@@ -1,4 +1,4 @@
-
+https://t.me/everyyyyyyyyyydayhttps://t.me/everyyyyyyyyyyday
 import os
 import json
 import random
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Bot configuration
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8003913696:AAFzWOmJIBA5lGA3ezQV1_DcLMcCbIZo86s")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@everyyyyyyyyyyday")
-GROUP_LINK = os.getenv("TELEGRAM_GROUP_LINK", "https://t.me/your_mental_health_group")
+GROUP_LINK = os.getenv("TELEGRAM_GROUP_LINK", "httpshttps://t.me/everyyyyyyyyyyday"
 DATABASE_PATH = "mental_health_data.db"
 
 # Conversation states
