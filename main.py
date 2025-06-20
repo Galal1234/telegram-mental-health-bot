@@ -1,559 +1,407 @@
 import os
 import json
-import random
-import schedule
-import time
-import threading
 import sqlite3
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-import asyncio
 import logging
-import hashlib
-import re
-from collections import defaultdict
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import asyncio
 
-# Enable comprehensive logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('mental_health_bot.log'),
-        logging.StreamHandler()
-    ]
-)
-
+# إعداد السجلات
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot configuration
+# إعدادات البوت
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8003913696:AAFzWOmJIBA5lGA3ezQV1_DcLMcCbIZo86s")
-CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@everyyyyyyyyyyday")
-GROUP_LINK = os.getenv("TELEGRAM_GROUP_LINK", "https://t.me/your_mental_health_group")
-DATABASE_PATH = "mental_health_data.db"
 
-# Conversation states
-(START, ASSESSMENT_SELECTION, PHQ9_TEST, GAD7_TEST, PSS_TEST, 
- BECK_ANXIETY, BECK_DEPRESSION, CUSTOM_ASSESSMENT, ANALYSIS, 
- FOLLOW_UP, END) = range(11)
+# أسئلة PHQ-9 للاكتئاب
+PHQ9_QUESTIONS = [
+    {
+        "id": "q1",
+        "text": "قلة الاهتمام أو المتعة في فعل الأشياء",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q2", 
+        "text": "الشعور بالإحباط أو الاكتئاب أو اليأس",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q3",
+        "text": "صعوبة في النوم أو النوم أكثر من اللازم",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q4",
+        "text": "الشعور بالتعب أو قلة الطاقة",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q5",
+        "text": "ضعف الشهية أو الإفراط في الأكل",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q6",
+        "text": "الشعور السيء تجاه نفسك أو أنك فاشل",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q7",
+        "text": "صعوبة في التركيز على الأشياء",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q8",
+        "text": "التحرك أو التحدث ببطء شديد أو العكس",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    },
+    {
+        "id": "q9",
+        "text": "أفكار أنه من الأفضل أن تموت أو إيذاء نفسك",
+        "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
+    }
+]
 
-@dataclass
-class UserProfile:
-    user_id: int
-    username: str
-    first_name: str
-    age: Optional[int] = None
-    gender: Optional[str] = None
-    created_at: datetime = None
-    last_assessment: datetime = None
-    risk_level: str = "unknown"
-    total_assessments: int = 0
-
-class DatabaseManager:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.init_database()
+def init_database():
+    """إنشاء قاعدة البيانات"""
+    conn = sqlite3.connect('mental_health.db')
+    cursor = conn.cursor()
     
-    def init_database(self):
-        """Initialize database with comprehensive schema"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Users table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            age INTEGER,
-            gender TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_assessment TIMESTAMP,
-            risk_level TEXT DEFAULT 'unknown',
-            total_assessments INTEGER DEFAULT 0,
-            emergency_contact TEXT,
-            consent_given BOOLEAN DEFAULT FALSE
-        )
-        ''')
-        
-        # Assessments table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS assessments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            assessment_type TEXT,
-            raw_scores TEXT,
-            calculated_scores TEXT,
-            risk_level TEXT,
-            severity TEXT,
-            recommendations TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            follow_up_needed BOOLEAN,
-            counselor_notified BOOLEAN DEFAULT FALSE,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-        ''')
-        
-        # User responses table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_responses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            assessment_id INTEGER,
-            question_id TEXT,
-            question_text TEXT,
-            response_text TEXT,
-            response_score INTEGER,
-            response_time_seconds INTEGER,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id),
-            FOREIGN KEY (assessment_id) REFERENCES assessments (id)
-        )
-        ''')
-        
-        # Notifications table
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            notification_type TEXT,
-            message TEXT,
-            scheduled_time TIMESTAMP,
-            sent BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully")
-
-class ClinicalAssessments:
-    """World-standard clinical assessments for mental health"""
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS assessments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        username TEXT,
+        first_name TEXT,
+        answers TEXT,
+        total_score INTEGER,
+        risk_level TEXT,
+        timestamp TEXT
+    )
+    ''')
     
-    # PHQ-9 Questions
-    PHQ9_QUESTIONS = [
-        {
-            "id": "phq9_1",
-            "question": "قلة الاهتمام أو المتعة في فعل الأشياء",
-            "category": "فقدان الاهتمام",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_2", 
-            "question": "الشعور بالإحباط أو الاكتئاب أو اليأس",
-            "category": "المزاج المكتئب",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_3",
-            "question": "صعوبة في النوم أو النوم أكثر من اللازم",
-            "category": "اضطرابات النوم",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_4",
-            "question": "الشعور بالتعب أو قلة الطاقة",
-            "category": "التعب والطاقة",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_5",
-            "question": "ضعف الشهية أو الإفراط في الأكل",
-            "category": "الشهية",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_6",
-            "question": "الشعور السيء تجاه نفسك - أو أنك فاشل أو خذلت نفسك أو عائلتك",
-            "category": "تقدير الذات",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_7",
-            "question": "صعوبة في التركيز على الأشياء مثل قراءة الجريدة أو مشاهدة التلفزيون",
-            "category": "التركيز",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_8",
-            "question": "التحرك أو التحدث ببطء شديد بحيث يلاحظ الآخرون، أو العكس - التململ أو الحركة الزائدة",
-            "category": "الحركة النفسية",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "phq9_9",
-            "question": "أفكار أنه من الأفضل أن تموت أو إيذاء نفسك بطريقة ما",
-            "category": "الأفكار الانتحارية",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        }
+    conn.commit()
+    conn.close()
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بدء البوت"""
+    user = update.effective_user
+    
+    welcome_text = f"""
+🧠 **أهلاً وسهلاً {user.first_name}!**
+
+مرحباً بك في نظام تقييم الصحة النفسية المتقدم 🌟
+
+**ما نقدمه لك:**
+✅ تقييم نفسي علمي معتمد (PHQ-9)
+✅ تحليل ذكي لحالتك النفسية  
+✅ توصيات علاجية مخصصة
+✅ خصوصية وأمان كاملين
+
+⚠️ **تنبيه مهم:**
+هذا التقييم للإرشاد الأولي ولا يغني عن استشارة طبيب مختص
+
+**هل تريد بدء التقييم النفسي؟**
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🚀 نعم، ابدأ التقييم", callback_data="start_assessment")],
+        [InlineKeyboardButton("ℹ️ معلومات أكثر", callback_data="more_info")],
+        [InlineKeyboardButton("❌ لا، شكراً", callback_data="cancel")]
     ]
     
-    # GAD-7 Questions
-    GAD7_QUESTIONS = [
-        {
-            "id": "gad7_1",
-            "question": "الشعور بالعصبية أو القلق أو التوتر",
-            "category": "القلق العام",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "gad7_2",
-            "question": "عدم القدرة على التوقف عن القلق أو السيطرة عليه",
-            "category": "التحكم في القلق",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "gad7_3",
-            "question": "القلق الشديد حول أشياء مختلفة",
-            "category": "القلق المفرط",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "gad7_4",
-            "question": "صعوبة في الاسترخاء",
-            "category": "الاسترخاء",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "gad7_5",
-            "question": "الشعور بالقلق الشديد لدرجة صعوبة البقاء ساكناً",
-            "category": "القلق الحركي",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "gad7_6",
-            "question": "الانزعاج أو الغضب بسهولة",
-            "category": "التهيج",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        },
-        {
-            "id": "gad7_7",
-            "question": "الشعور بالخوف كما لو أن شيئاً فظيعاً قد يحدث",
-            "category": "توقع الكارثة",
-            "options": [("مطلقاً", 0), ("عدة أيام", 1), ("أكثر من نصف الأيام", 2), ("تقريباً كل يوم", 3)]
-        }
-    ]
+    await update.message.reply_text(
+        welcome_text, 
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
 
-class AIAnalyzer:
-    """AI analysis for mental health assessments"""
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة الأزرار"""
+    query = update.callback_query
+    await query.answer()
     
-    def __init__(self):
-        self.response_patterns = {
-            'emotional_indicators': {
-                'positive': ['سعيد', 'مرتاح', 'هادئ', 'متفائل', 'راضي'],
-                'negative': ['حزين', 'قلق', 'خائف', 'غاضب', 'محبط'],
-                'extreme': ['انتحار', 'موت', 'إيذاء', 'نهاية']
-            }
-        }
-    
-    def analyze_text_response(self, text: str) -> Dict[str, float]:
-        """Analyze text responses"""
-        text_lower = text.lower()
-        scores = {
-            'emotional_distress': 0.0,
-            'risk_indicators': 0.0
-        }
-        
-        negative_count = sum(1 for word in self.response_patterns['emotional_indicators']['negative'] 
-                           if word in text_lower)
-        extreme_count = sum(1 for word in self.response_patterns['emotional_indicators']['extreme'] 
-                          if word in text_lower)
-        
-        scores['emotional_distress'] = min(1.0, negative_count * 0.2)
-        scores['risk_indicators'] = min(1.0, extreme_count * 0.5)
-        
-        return scores
-    
-    def calculate_composite_risk(self, assessment_scores: Dict[str, float], 
-                               text_analysis: Dict[str, float]) -> Tuple[str, float]:
-        """Calculate overall risk level"""
-        total_score = 0.0
-        
-        if 'phq9_total' in assessment_scores:
-            phq9_normalized = min(1.0, assessment_scores['phq9_total'] / 27.0)
-            total_score += phq9_normalized * 0.4
-        
-        if 'gad7_total' in assessment_scores:
-            gad7_normalized = min(1.0, assessment_scores['gad7_total'] / 21.0)
-            total_score += gad7_normalized * 0.3
-        
-        text_risk = text_analysis.get('risk_indicators', 0) * 2 + text_analysis.get('emotional_distress', 0)
-        total_score += text_risk * 0.3
-        
-        if total_score >= 0.8:
-            return "عالي جداً - طوارئ", total_score
-        elif total_score >= 0.6:
-            return "عالي", total_score
-        elif total_score >= 0.4:
-            return "متوسط", total_score
-        else:
-            return "منخفض", total_score
+    if query.data == "start_assessment":
+        await start_assessment(query, context)
+    elif query.data == "more_info":
+        await show_more_info(query, context)
+    elif query.data == "cancel":
+        await cancel_assessment(query, context)
+    elif query.data.startswith("answer_"):
+        await handle_answer(query, context)
+    elif query.data == "new_assessment":
+        await start_assessment(query, context)
 
-class AdvancedMentalHealthBot:
-    """Advanced Mental Health Assessment Bot"""
+async def start_assessment(query, context):
+    """بدء التقييم النفسي"""
+    context.user_data['current_question'] = 0
+    context.user_data['answers'] = {}
+    context.user_data['start_time'] = datetime.now()
     
-    def __init__(self):
-        self.db = DatabaseManager(DATABASE_PATH)
-        self.assessments = ClinicalAssessments()
-        self.ai_analyzer = AIAnalyzer()
-        self.app_instance = None
-    
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Enhanced start command"""
-        user = update.effective_user
-        
-        # Check if user exists
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user.id,))
-        existing_user = cursor.fetchone()
-        
-        if not existing_user:
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name, created_at)
-                VALUES (?, ?, ?, ?)
-            ''', (user.id, user.username, user.first_name, datetime.now()))
-            conn.commit()
-            
-            welcome_message = f"""
-🌟 **أهلاً وسهلاً {user.first_name}!**
+    await send_question(query, context)
 
-أنا نظام تقييم الصحة النفسية المتقدم، مصمم لتقديم تقييم علمي دقيق وشامل.
-
-🎯 **ما أقدمه:**
-• تقييمات نفسية معتمدة عالمياً (PHQ-9, GAD-7)
-• تحليل ذكي باستخدام الذكاء الاصطناعي
-• توصيات علاجية مخصصة
-• متابعة دورية ودعم مستمر
-
-⚠️ **مهم:** هذا للتقييم الأولي ولا يغني عن استشارة طبيب مختص.
-
-هل توافق على بدء التقييم؟
-            """
-            
-            keyboard = [
-                [InlineKeyboardButton("موافق، ابدأ التقييم 🎯", callback_data="start_assessment")],
-                [InlineKeyboardButton("غير موافق ❌", callback_data="decline")]
-            ]
-        else:
-            welcome_message = f"👋 مرحباً بعودتك {user.first_name}!"
-            keyboard = [
-                [InlineKeyboardButton("تقييم جديد 🔄", callback_data="start_assessment")],
-                [InlineKeyboardButton("عرض الإحصائيات 📈", callback_data="view_stats")]
-            ]
-        
-        conn.close()
-        await update.message.reply_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+async def send_question(query, context):
+    """إرسال السؤال التالي"""
+    question_index = context.user_data.get('current_question', 0)
     
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle button callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "start_assessment":
-            await self.start_assessment(query, context)
-        elif query.data.startswith("answer_"):
-            await self.handle_answer(query, context)
+    if question_index >= len(PHQ9_QUESTIONS):
+        await complete_assessment(query, context)
+        return
     
-    async def start_assessment(self, query, context):
-        """Start PHQ-9 assessment"""
-        context.user_data['current_assessment'] = 'phq9'
-        context.user_data['question_index'] = 0
-        context.user_data['answers'] = {}
-        
-        # Create assessment record
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO assessments (user_id, assessment_type, timestamp)
-            VALUES (?, ?, ?)
-        ''', (query.from_user.id, 'phq9', datetime.now()))
-        context.user_data['assessment_id'] = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        
-        await self.send_question(query, context)
+    question = PHQ9_QUESTIONS[question_index]
     
-    async def send_question(self, query, context):
-        """Send current question"""
-        question_index = context.user_data['question_index']
-        questions = self.assessments.PHQ9_QUESTIONS
-        
-        if question_index >= len(questions):
-            await self.complete_assessment(query, context)
-            return
-        
-        question = questions[question_index]
-        keyboard = []
-        
-        for i, (option_text, score) in enumerate(question['options']):
-            callback_data = f"answer_{question['id']}_{i}_{score}"
-            keyboard.append([InlineKeyboardButton(option_text, callback_data=callback_data)])
-        
-        message_text = f"""
+    # إنشاء أزرار الإجابات
+    keyboard = []
+    for i, (option_text, score) in enumerate(question['options']):
+        callback_data = f"answer_{question['id']}_{i}_{score}"
+        keyboard.append([InlineKeyboardButton(option_text, callback_data=callback_data)])
+    
+    question_text = f"""
 📋 **استبيان الصحة النفسية (PHQ-9)**
-السؤال {question_index + 1}/{len(questions)}
 
-🔍 **{question['category']}**
+**السؤال {question_index + 1} من {len(PHQ9_QUESTIONS)}**
 
-❓ خلال الأسبوعين الماضيين، كم مرة تضايقت من:
+❓ **خلال الأسبوعين الماضيين، كم مرة تضايقت من:**
 
-{question['question']}
-        """
-        
-        await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    
-    async def handle_answer(self, query, context):
-        """Handle user answer"""
-        parts = query.data.split("_")
-        question_id = parts[1]
-        option_index = int(parts[2])
-        score = int(parts[3])
-        
-        # Store answer
-        context.user_data['answers'][question_id] = score
-        
-        # Show selected answer
-        questions = self.assessments.PHQ9_QUESTIONS
-        selected_option = questions[context.user_data['question_index']]['options'][option_index][0]
-        await query.edit_message_text(f"✅ تم اختيار: {selected_option}")
-        
-        # Move to next question
-        context.user_data['question_index'] += 1
-        
-        await asyncio.sleep(1)
-        await self.send_question(query, context)
-    
-    async def complete_assessment(self, query, context):
-        """Complete assessment and provide analysis"""
-        answers = context.user_data['answers']
-        
-        # Calculate PHQ-9 score
-        total_score = sum(answers.values())
-        
-        # Determine severity
-        if total_score <= 4:
-            severity = "أعراض اكتئاب طفيفة"
-            risk_level = "منخفض"
-        elif total_score <= 9:
-            severity = "أعراض اكتئاب خفيفة"
-            risk_level = "منخفض إلى متوسط"
-        elif total_score <= 14:
-            severity = "أعراض اكتئاب متوسطة"
-            risk_level = "متوسط"
-        elif total_score <= 19:
-            severity = "أعراض اكتئاب متوسطة إلى شديدة"
-            risk_level = "عالي"
-        else:
-            severity = "أعراض اكتئاب شديدة"
-            risk_level = "عالي جداً"
-        
-        # Generate recommendations
-        recommendations = self.generate_recommendations(total_score, answers)
-        
-        # Update database
-        conn = sqlite3.connect(self.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE assessments 
-            SET calculated_scores = ?, risk_level = ?, severity = ?, recommendations = ?
-            WHERE id = ?
-        ''', (json.dumps({'phq9_total': total_score}), risk_level, severity, 
-              json.dumps(recommendations), context.user_data['assessment_id']))
-        
-        cursor.execute('''
-            UPDATE users 
-            SET last_assessment = ?, risk_level = ?, total_assessments = total_assessments + 1
-            WHERE user_id = ?
-        ''', (datetime.now(), risk_level, query.from_user.id))
-        
-        conn.commit()
-        conn.close()
-        
-        # Generate report
-        report = f"""
-🧠 **تقرير التقييم النفسي**
+{question['text']}
 
-📊 **النتائج:**
-• النتيجة الإجمالية: {total_score}/27
-• التصنيف: {severity}
-• مستوى المخاطر: {risk_level}
-
-💡 **التوصيات:**
-"""
-        
-        for i, rec in enumerate(recommendations[:5], 1):
-            report += f"{i}. {rec}\n"
-        
-        report += """
-📞 **المساعدة الفورية:**
-• خط المساعدة النفسية: 920033360
-• الطوارئ: 997
-
-⚠️ هذا التقييم للإرشاد فقط ولا يغني عن استشارة طبيب مختص.
-        """
-        
-        await query.message.reply_text(report, parse_mode='Markdown')
-        
-        # Offer new assessment
-        keyboard = [[InlineKeyboardButton("إجراء تقييم جديد 🔄", callback_data="start_assessment")]]
-        await query.message.reply_text("هل تريد إجراء تقييم آخر؟", reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    def generate_recommendations(self, score: int, answers: Dict) -> List[str]:
-        """Generate personalized recommendations"""
-        recommendations = []
-        
-        if score >= 15:
-            recommendations.extend([
-                "🚨 استشارة طبيب نفسي فوراً لتقييم شامل",
-                "💊 مناقشة العلاج الدوائي مع مختص",
-                "🧠 العلاج النفسي المعرفي السلوكي (CBT)"
-            ])
-        elif score >= 10:
-            recommendations.extend([
-                "👨‍⚕️ استشارة طبيب نفسي أو أخصائي نفسي",
-                "🏃‍♂️ ممارسة الرياضة 30 دقيقة يومياً",
-                "🧘‍♀️ تقنيات الاسترخاء والتأمل"
-            ])
-        else:
-            recommendations.extend([
-                "💚 الحفاظ على الأنشطة الإيجابية",
-                "🤝 التواصل الاجتماعي المنتظم",
-                "😴 نظام نوم صحي ومنتظم"
-            ])
-        
-        # Specific recommendations based on symptoms
-        if answers.get('phq9_9', 0) > 0:  # Suicidal thoughts
-            recommendations.insert(0, "🚨 **عاجل**: التواصل الفوري مع خط المساعدة أو الطوارئ")
-        
-        if answers.get('phq9_3', 0) >= 2:  # Sleep problems
-            recommendations.append("😴 استشارة طبيب حول اضطرابات النوم")
-        
-        if answers.get('phq9_4', 0) >= 2:  # Fatigue
-            recommendations.append("⚡ فحص طبي شامل لاستبعاد أسباب جسدية للتعب")
-        
-        return recommendations
-
-def main():
-    """Main function"""
-    bot = AdvancedMentalHealthBot()
+**اختر الإجابة المناسبة:**
+    """
     
     try:
-        bot.app_instance = Application.builder().token(TOKEN).build()
-        bot.app_instance.add_handler(CommandHandler("start", bot.start_command))
-        bot.app_instance.add_handler(CallbackQueryHandler(bot.handle_callback))
-        
-        logger.info("🚀 Mental Health Bot starting...")
-        bot.app_instance.run_polling()
-        
-    except Exception as e:
-        logger.error(f"❌ Error: {e}")
+        await query.edit_message_text(
+            question_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    except:
+        await query.message.reply_text(
+            question_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+async def handle_answer(query, context):
+    """معالجة إجابة المستخدم"""
+    # تحليل البيانات المرسلة
+    parts = query.data.split("_")
+    question_id = parts[1]
+    option_index = int(parts[2])
+    score = int(parts[3])
+    
+    # حفظ الإجابة
+    context.user_data['answers'][question_id] = score
+    
+    # عرض الإجابة المختارة
+    question_index = context.user_data.get('current_question', 0)
+    selected_option = PHQ9_QUESTIONS[question_index]['options'][option_index][0]
+    
+    await query.edit_message_text(f"✅ **تم اختيار:** {selected_option}")
+    
+    # الانتقال للسؤال التالي
+    context.user_data['current_question'] = question_index + 1
+    
+    # انتظار قصير ثم إرسال السؤال التالي
+    await asyncio.sleep(1.5)
+    await send_question(query, context)
+
+async def complete_assessment(query, context):
+    """إكمال التقييم وإعطاء النتائج"""
+    answers = context.user_data.get('answers', {})
+    total_score = sum(answers.values())
+    
+    # تحديد مستوى المخاطر
+    if total_score <= 4:
+        risk_level = "منخفض"
+        severity = "أعراض اكتئاب طفيفة أو معدومة"
+        color = "🟢"
+    elif total_score <= 9:
+        risk_level = "خفيف"
+        severity = "أعراض اكتئاب خفيفة"
+        color = "🟡"
+    elif total_score <= 14:
+        risk_level = "متوسط"
+        severity = "أعراض اكتئاب متوسطة"
+        color = "🟠"
+    elif total_score <= 19:
+        risk_level = "عالي"
+        severity = "أعراض اكتئاب متوسطة إلى شديدة"
+        color = "🔴"
+    else:
+        risk_level = "عالي جداً"
+        severity = "أعراض اكتئاب شديدة"
+        color = "🚨"
+    
+    # حفظ النتائج في قاعدة البيانات
+    user = query.from_user
+    save_assessment(user.id, user.username, user.first_name, answers, total_score, risk_level)
+    
+    # إنشاء التوصيات
+    recommendations = generate_recommendations(total_score, answers)
+    
+    # إنشاء التقرير
+    report = f"""
+🧠 **تقرير التقييم النفسي الشامل**
+
+👤 **المستخدم:** {user.first_name}
+📅 **التاريخ:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+📊 **النتائج:**
+{color} **النتيجة الإجمالية:** {total_score}/27
+{color} **التصنيف:** {severity}
+{color} **مستوى المخاطر:** {risk_level}
+
+💡 **التوصيات العلاجية:**
+{chr(10).join(f"{i+1}. {rec}" for i, rec in enumerate(recommendations))}
+
+📞 **خطوط المساعدة العاجلة:**
+• خط المساعدة النفسية: 920033360
+• الطوارئ: 997
+• خط الأمان الوطني: 1919
+
+⚠️ **تنبيه مهم:**
+هذا التقييم للإرشاد الأولي فقط ولا يغني عن التشخيص الطبي المتخصص.
+
+💙 **رسالة أمل:**
+مهما كانت النتيجة، تذكر أن طلب المساعدة خطوة شجاعة نحو التحسن.
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 إجراء تقييم جديد", callback_data="new_assessment")],
+        [InlineKeyboardButton("📋 نصائح إضافية", callback_data="more_tips")]
+    ]
+    
+    await query.message.reply_text(
+        report,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+def generate_recommendations(score, answers):
+    """إنشاء توصيات مخصصة"""
+    recommendations = []
+    
+    # توصيات حسب النتيجة الإجمالية
+    if score >= 20:
+        recommendations.extend([
+            "🚨 **عاجل**: استشارة طبيب نفسي فوراً",
+            "💊 مناقشة العلاج الدوائي مع مختص",
+            "🏥 زيارة أقرب مستشفى للتقييم العاجل"
+        ])
+    elif score >= 15:
+        recommendations.extend([
+            "👨‍⚕️ استشارة طبيب نفسي أو أخصائي نفسي",
+            "🧠 العلاج النفسي المعرفي السلوكي (CBT)",
+            "💊 تقييم الحاجة للعلاج الدوائي"
+        ])
+    elif score >= 10:
+        recommendations.extend([
+            "🩺 استشارة أخصائي نفسي",
+            "🏃‍♂️ ممارسة الرياضة 30 دقيقة يومياً",
+            "🧘‍♀️ تعلم تقنيات الاسترخاء والتأمل"
+        ])
+    else:
+        recommendations.extend([
+            "💚 الحفاظ على الأنشطة الإيجابية",
+            "🤝 تقوية العلاقات الاجتماعية",
+            "😴 الحفاظ على نظام نوم صحي"
+        ])
+    
+    # توصيات خاصة حسب الأعراض
+    if answers.get('q9', 0) > 0:  # أفكار إيذاء النفس
+        recommendations.insert(0, "🚨 **أولوية قصوى**: التواصل الفوري مع خطوط الطوارئ")
+    
+    if answers.get('q3', 0) >= 2:  # مشاكل النوم
+        recommendations.append("😴 استشارة طبيب حول اضطرابات النوم")
+    
+    if answers.get('q4', 0) >= 2:  # التعب
+        recommendations.append("⚡ فحص طبي شامل لاستبعاد أسباب جسدية")
+    
+    return recommendations[:6]  # أول 6 توصيات
+
+def save_assessment(user_id, username, first_name, answers, total_score, risk_level):
+    """حفظ التقييم في قاعدة البيانات"""
+    conn = sqlite3.connect('mental_health.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    INSERT INTO assessments (user_id, username, first_name, answers, total_score, risk_level, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, username, first_name, json.dumps(answers), total_score, risk_level, datetime.now().isoformat()))
+    
+    conn.commit()
+    conn.close()
+
+async def show_more_info(query, context):
+    """عرض معلومات إضافية"""
+    info_text = """
+📖 **معلومات حول التقييم النفسي**
+
+🎯 **ما هو استبيان PHQ-9؟**
+هو أداة تشخيص معتمدة عالمياً لتقييم أعراض الاكتئاب
+
+🔬 **الأساس العلمي:**
+• طورته منظمة الصحة العالمية
+• مستخدم في المستشفيات والعيادات
+• دقة عالية في التشخيص الأولي
+
+🛡️ **الخصوصية:**
+• بياناتك محمية ومشفرة
+• لا نشارك معلوماتك مع أي طرف ثالث
+• يمكنك حذف بياناتك في أي وقت
+
+⏱️ **المدة:**
+التقييم يستغرق 5-7 دقائق فقط
+
+هل تريد بدء التقييم الآن؟
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🚀 نعم، ابدأ التقييم", callback_data="start_assessment")],
+        [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="cancel")]
+    ]
+    
+    await query.edit_message_text(
+        info_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def cancel_assessment(query, context):
+    """إلغاء التقييم"""
+    cancel_text = """
+✋ **تم إلغاء التقييم**
+
+لا مشكلة! يمكنك العودة في أي وقت تريده.
+
+💡 **تذكر:**
+• صحتك النفسية مهمة
+• طلب المساعدة علامة قوة
+• نحن هنا عندما تكون مستعداً
+
+اكتب /start للعودة في أي وقت
+
+🌟 **في رعاية الله**
+    """
+    
+    await query.edit_message_text(cancel_text, parse_mode='Markdown')
+
+def main():
+    """تشغيل البوت"""
+    # إنشاء قاعدة البيانات
+    init_database()
+    
+    # إنشاء التطبيق
+    application = Application.builder().token(TOKEN).build()
+    
+    # إضافة المعالجات
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    
+    # بدء تشغيل البوت
+    logger.info("🚀 بوت الصحة النفسية يعمل الآن!")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
